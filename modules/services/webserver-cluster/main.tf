@@ -1,19 +1,18 @@
-provider "aws" {
-  region = "us-west-1"
-}
-
 resource "aws_launch_configuration" "example" {
   image_id      = "ami-0cbd40f694b804622"
-  instance_type = "t2.micro"
+  instance_type = var.instance_type
   # The vpc_security_group_ids parameter is set to the ID of the security group created by the module.
   security_groups = [aws_security_group.instance.id]
-  # The <<-EOF and EOF are Terraform’s heredoc syntax, which allows you to create
+  # The <<EOF and EOF are Terraform’s heredoc syntax, which allows you to create
   # multiline strings without having to insert \n characters all over the plac
-  user_data = <<-EOF
-                #!/bin/bash
-                echo "Hello, World" > index.html
-                nohup busybox httpd -f -p ${var.server_port} &
-                EOF
+
+
+  # Render the User Data script as a template
+  user_data = templatefile("${path.module}/user-data.sh", {
+    server_port = var.server_port
+    db_address  = data.terraform_remote_state.db.outputs.address
+    db_port     = data.terraform_remote_state.db.outputs.port
+  })
 
   # Required when using a launch configuration with an auto scaling group.
   lifecycle {
@@ -28,17 +27,17 @@ resource "aws_autoscaling_group" "example" {
   target_group_arns = [aws_lb_target_group.asg.arn]
   health_check_type = "ELB"
 
-  min_size = 2
-  max_size = 10
+  min_size = var.min_size
+  max_size = var.max_size
   tag {
     key                 = "Name"
-    value               = "terraform-asg-example"
+    value               = "${var.cluster_name}-asg"
     propagate_at_launch = true
   }
 }
 
 resource "aws_security_group" "instance" {
-  name = "terraform-example-instance"
+  name = "${var.cluster_name}-instance"
   ingress {
     from_port   = var.server_port
     to_port     = var.server_port
@@ -47,16 +46,8 @@ resource "aws_security_group" "instance" {
   }
 }
 
-variable "server_port" {
-  description = "The port the server will use for HTTP requests"
-  type        = number
-  default     = 8080
-}
 
-output "alb_dns_name" {
-  value       = aws_lb.example.dns_name
-  description = "The domain name of the load balancer"
-}
+
 
 data "aws_vpc" "default" {
   default = true
@@ -70,7 +61,7 @@ data "aws_subnets" "default" {
 }
 # the load balancer needs to have a security group defined to allow ingress and egress traffic
 resource "aws_lb" "example" {
-  name               = "terraform-asg-example"
+  name               = "${var.cluster_name}-lb"
   load_balancer_type = "application"
   subnets            = data.aws_subnets.default.ids
   security_groups    = [aws_security_group.alb.id]
@@ -94,7 +85,7 @@ resource "aws_lb_listener" "http" {
 }
 
 resource "aws_security_group" "alb" {
-  name = "terraform-example-alb"
+  name = "${var.cluster_name}-alb"
   # Allow inbound HTTP requests
   ingress {
     from_port   = 80
@@ -114,7 +105,7 @@ resource "aws_security_group" "alb" {
 
 # the lb target group tells the load balancer to route traffic to the instances in the auto scaling group
 resource "aws_lb_target_group" "asg" {
-  name     = "terraform-asg-example"
+  name     = "${var.cluster_name}-asg"
   port     = var.server_port
   protocol = "HTTP"
   vpc_id   = data.aws_vpc.default.id
@@ -141,5 +132,13 @@ resource "aws_lb_listener_rule" "asg" {
   action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.asg.arn
+  }
+}
+data "terraform_remote_state" "db" {
+  backend = "s3"
+  config = {
+    bucket = var.db_remote_state_bucket
+    key    = var.db_remote_state_key
+    region = "us-west-1"
   }
 }
